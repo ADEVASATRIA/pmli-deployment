@@ -199,6 +199,21 @@ sudo tail -n 50 /var/www/pmli-backend/storage/logs/laravel.log
 Then exercise login, a read endpoint and an upload from the real frontend. Confirm the API user only connects from
 192.168.50.50, and rotate any credential that was shared during setup.
 
+## Nginx-only updates (after go-live)
+
+When only `nginx/api-lms.pmli.co.id.conf` changed — no Composer dependency, code, cache, or PHP-FPM change is
+needed — use `scripts/05-update-api-nginx.sh` instead of the full `03-deploy-app.sh`. It touches Nginx only: no
+Composer, no `php artisan` (any), no migrations, no `.env` edits, no PHP-FPM restart, no package installs, and it
+never modifies the TLS certificate/key files themselves (only references the paths already configured in
+`env/api.env`). Same backup-before-replace and automatic rollback-on-`nginx -t`-failure behavior as `03-deploy-app.sh`;
+safe to run repeatedly.
+
+```bash
+cd ~/pmli-deployment
+git pull
+sudo ./scripts/05-update-api-nginx.sh
+```
+
 ---
 
 ## Appendix — Items pending confirmation
