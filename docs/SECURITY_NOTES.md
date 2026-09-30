@@ -18,8 +18,11 @@
 - **Firewall.** UFW is currently inactive and these scripts do not enable it (enabling blindly can lock you out of SSH).
   The **cloud Security Group must be reviewed**: API VM — 80/443 public, 22 from trusted IPs only; DB VM — 3306 from
   192.168.50.50 only, 22 from trusted IPs only. If enabling UFW later, allow SSH first.
-- **SSL/HTTPS is required before production go-live.** The provided Nginx config is HTTP-only on purpose. Provision a
-  certificate, then switch `APP_URL` to `https://` and consider HSTS.
+- **SSL/HTTPS is required before production go-live.** The provided Nginx config serves both plain HTTP on :80 (for
+  the private frontend->API path — deliberately never redirected to HTTPS, since a redirect to the private IP would
+  fail certificate validation) and TLS on :443 for the public domain, from a single server block. The cert/key paths
+  come from `TLS_CERT_PATH`/`TLS_KEY_PATH` in `env/api.env` — provision the certificate first (this repo never issues
+  or renews it), then switch `APP_URL` to `https://` and consider HSTS.
 - **Rotate credentials that have been shared during setup** (DB app password, root/sudo passwords, SSH keys, any token pasted into chats or tickets).
 - **Least-privilege file ownership.** Only `storage/` and `bootstrap/cache/` are owned by `www-data` (dirs 775, files 664).
   Application code and `vendor/` stay non-writable by the web user. `.env` should be `640`, group `www-data`.

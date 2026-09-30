@@ -76,7 +76,7 @@ Full detail: [docs/DEPLOYMENT_RUNBOOK.md](docs/DEPLOYMENT_RUNBOOK.md).
 - `git clone` / `git pull` of the backend
 - Creating or editing the Laravel `.env`, generating `APP_KEY`
 - Enabling UFW (review the cloud Security Group first)
-- SSL/Certbot provisioning (HTTP only until DNS/SSL is ready)
+- Issuing or renewing the TLS certificate itself — `TLS_CERT_PATH`/`TLS_KEY_PATH` in `env/api.env` must already point at a valid cert/key pair before `03-deploy-app.sh` runs (it fails fast otherwise); see `docs/DEPLOYMENT_RUNBOOK.md` Phase J
 - `mysql_secure_installation`, root DB authentication changes
 - Any deletion of data
 

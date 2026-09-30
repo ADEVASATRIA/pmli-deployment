@@ -30,7 +30,7 @@ done
 require_root
 for c in php composer nginx runuser systemctl find; do require_command "${c}"; done
 load_env_file "${ENV_FILE}"
-for v in EXPECTED_HOSTNAME DB_PRIVATE_IP APP_DOMAIN APP_DIR PHP_VERSION WEB_USER WEB_GROUP; do require_var "${v}"; done
+for v in EXPECTED_HOSTNAME DB_PRIVATE_IP APP_DOMAIN APP_DIR PHP_VERSION WEB_USER WEB_GROUP TLS_CERT_PATH TLS_KEY_PATH; do require_var "${v}"; done
 confirm_hostname "${EXPECTED_HOSTNAME}"
 id -u "${WEB_USER}" >/dev/null 2>&1 || die "User '${WEB_USER}' does not exist."
 
@@ -157,13 +157,19 @@ safe_systemctl_restart "php${PHP_VERSION}-fpm"
 # --- Nginx site --------------------------------------------------------------
 SRC_CONF="${REPO_DIR}/nginx/${APP_DOMAIN}.conf"
 require_file "${SRC_CONF}" "nginx site config"
+# The site serves TLS on :443 (see nginx/${APP_DOMAIN}.conf) - the cert/key must already be
+# in place. This script never issues or modifies certificates; it only wires the paths in.
+require_file "${TLS_CERT_PATH}" "TLS certificate (TLS_CERT_PATH)"
+require_file "${TLS_KEY_PATH}"  "TLS private key (TLS_KEY_PATH)"
 AVAIL="/etc/nginx/sites-available/${APP_DOMAIN}.conf"
 ENABLED="/etc/nginx/sites-enabled/${APP_DOMAIN}.conf"
 DEFAULT_LINK="/etc/nginx/sites-enabled/default"
 
 RENDERED="$(mktemp)"
 sed -e "s#/var/www/pmli-backend/public#${APP_DIR}/public#g" \
-    -e "s#php8\.3-fpm\.sock#php${PHP_VERSION}-fpm.sock#g" "${SRC_CONF}" > "${RENDERED}"
+    -e "s#php8\.3-fpm\.sock#php${PHP_VERSION}-fpm.sock#g" \
+    -e "s#/etc/ssl/pmli/fullchain\.crt#${TLS_CERT_PATH}#g" \
+    -e "s#/etc/ssl/pmli/private\.key#${TLS_KEY_PATH}#g" "${SRC_CONF}" > "${RENDERED}"
 
 HAD_AVAIL=0; PREV_BACKUP=""
 if [[ -f "${AVAIL}" ]]; then

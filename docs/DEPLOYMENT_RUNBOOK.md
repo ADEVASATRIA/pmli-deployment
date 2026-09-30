@@ -166,20 +166,32 @@ curl -i -H 'Host: api-lms.pmli.co.id' http://127.0.0.1/
 sudo ./scripts/04-verify-deployment.sh
 ```
 
-## Phase J — DNS / SSL
+## Phase J — DNS / TLS
 
 1. Point `api-lms.pmli.co.id` A record → `160.20.105.140`.
 2. Ensure the cloud Security Group allows 80/443 (and 22 from trusted IPs only) on the API VM; allow 3306 on the DB VM
    **only from 192.168.50.50**. UFW is inactive and is not enabled by these scripts.
-3. Issue a certificate (e.g. Certbot with the Nginx plugin) — an operator action, not scripted. SSL/HTTPS is **required
-   before go-live**.
-4. After HTTPS works: set `APP_URL=https://…`, re-run `03-deploy-app.sh` (refreshes config cache), consider HSTS.
+3. Obtain a certificate for `api-lms.pmli.co.id` (e.g. Certbot, or one issued out-of-band) and place the full chain +
+   private key on the API VM — an operator action, not scripted. This repo never issues, renews, or reads the
+   contents of a certificate.
+4. Set `TLS_CERT_PATH` / `TLS_KEY_PATH` in `env/api.env` to those two file paths, then re-run
+   `sudo ./scripts/03-deploy-app.sh`. `nginx/api-lms.pmli.co.id.conf` is a single server block that already serves
+   **both** plain HTTP on :80 (the private frontend->API path — deliberately never redirected to HTTPS, since
+   redirecting a private-IP request would fail certificate validation) **and** TLS on :443 for the public domain,
+   from the same routing rules — no manual Nginx edit is needed. The script refuses to install the site if either
+   TLS path does not exist.
+5. After HTTPS works: set `APP_URL=https://…` in the Laravel `.env`, re-run `03-deploy-app.sh` again (refreshes the
+   config cache), consider HSTS.
 
 ## Phase K — Smoke testing
 
 ```bash
-curl -i http://api-lms.pmli.co.id/            # then https:// after Phase J
-curl -i http://api-lms.pmli.co.id/.env        # must be 403/404
+curl -i http://api-lms.pmli.co.id/                                    # then https:// after Phase J
+curl -i http://api-lms.pmli.co.id/.env                                # must be 403/404
+# From the Frontend VM — the exact path the frontend Nginx proxy uses. Must NOT be 301
+# (would mean private traffic is being redirected to HTTPS again) and must NOT be a bare
+# Nginx 404 (would mean :80 is not routing into Laravel); 200/400/401/422/429 are all fine.
+curl -i -X POST http://192.168.50.50/api/v1/auth/login -H 'Content-Type: application/json' -d '{}'
 sudo tail -n 50 /var/log/nginx/api-lms.pmli.co.id.error.log
 sudo tail -n 50 /var/www/pmli-backend/storage/logs/laravel.log
 ```

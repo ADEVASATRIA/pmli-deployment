@@ -26,7 +26,7 @@ done
 require_root   # needed to read .env and run artisan as the web user
 for c in php curl nginx runuser systemctl; do require_command "${c}"; done
 load_env_file "${ENV_FILE}"
-for v in APP_DIR APP_DOMAIN PHP_VERSION WEB_USER DB_PRIVATE_IP; do require_var "${v}"; done
+for v in APP_DIR APP_DOMAIN PHP_VERSION WEB_USER DB_PRIVATE_IP API_PRIVATE_IP; do require_var "${v}"; done
 
 PASS=0; WARN=0; FAIL=0
 check_pass() { PASS=$((PASS + 1)); log_ok "$*"; }
@@ -122,6 +122,53 @@ else
 fi
 CODE="$(http_code -H "Host: ${APP_DOMAIN}" http://127.0.0.1/.env)"
 [[ "${CODE}" == "404" || "${CODE}" == "403" ]] && check_pass "/.env is blocked (HTTP ${CODE})" || check_fail "/.env returned HTTP ${CODE} - must be blocked!"
+
+# --- Public HTTPS endpoint (real cert, real SNI, via loopback) --------------
+# --resolve pins the DNS lookup to this host without touching /etc/hosts or leaving the
+# machine, while still sending the correct SNI/Host so the real api-lms.pmli.co.id
+# certificate is actually validated (a plain https://127.0.0.1/ request would not).
+CODE="$(http_code --resolve "${APP_DOMAIN}:443:127.0.0.1" "https://${APP_DOMAIN}/")"
+if [[ "${CODE}" =~ ^[123] || "${CODE}" == "404" || "${CODE}" == "401" || "${CODE}" == "403" ]]; then
+  check_pass "HTTPS https://${APP_DOMAIN}/ -> HTTP ${CODE} (certificate validated)"
+else
+  check_fail "HTTPS https://${APP_DOMAIN}/ -> HTTP ${CODE} (curl exit/TLS or app error - see -v manually)"
+fi
+
+# --- Private HTTP path (exactly what the frontend Nginx proxy sends) --------
+# This is the path that regressed to a 301 (redirect to an IP the cert doesn't cover)
+# and then to a bare Nginx 404. Plain HTTP, no -k/-v needed: it must never redirect.
+CODE="$(http_code "http://${API_PRIVATE_IP}/")"
+if [[ "${CODE}" =~ ^[123] || "${CODE}" == "404" || "${CODE}" == "401" || "${CODE}" == "403" ]]; then
+  check_pass "Private HTTP http://${API_PRIVATE_IP}/ -> HTTP ${CODE}"
+else
+  check_fail "Private HTTP http://${API_PRIVATE_IP}/ -> HTTP ${CODE}"
+fi
+REDIRECT="$(curl -sS -o /dev/null -w '%{redirect_url}' --max-time 10 "http://${API_PRIVATE_IP}/" 2>/dev/null || true)"
+if [[ -z "${REDIRECT}" ]]; then
+  check_pass "http://${API_PRIVATE_IP}/ does not redirect"
+else
+  check_fail "http://${API_PRIVATE_IP}/ redirects to '${REDIRECT}' - must serve Laravel directly, never redirect"
+fi
+
+# --- The actual regression: POST /api/v1/auth/login over the private path ---
+# No real credentials required/sent. A Laravel JSON response (any of 200/400/401/422/429)
+# proves the request reached Laravel; a 301 or a bodyless/non-JSON Nginx 404 means the
+# private :80 vhost is misrouting again.
+LOGIN_BODY="$(mktemp)"
+LOGIN_CODE="$(curl -sS -o "${LOGIN_BODY}" -w '%{http_code}' --max-time 10 \
+  -X POST "http://${API_PRIVATE_IP}/api/v1/auth/login" \
+  -H 'Content-Type: application/json' -H 'Accept: application/json' \
+  -d '{}' 2>/dev/null || echo 000)"
+if [[ "${LOGIN_CODE}" == "301" ]]; then
+  check_fail "POST http://${API_PRIVATE_IP}/api/v1/auth/login -> HTTP 301 (redirecting private traffic to HTTPS again - regression!)"
+elif [[ "${LOGIN_CODE}" == "404" ]] && ! grep -q '"success"' "${LOGIN_BODY}" 2>/dev/null; then
+  check_fail "POST http://${API_PRIVATE_IP}/api/v1/auth/login -> HTTP 404 with a non-Laravel body (Nginx is not routing into Laravel - regression!)"
+elif [[ "${LOGIN_CODE}" =~ ^(200|400|401|422|429)$ ]]; then
+  check_pass "POST http://${API_PRIVATE_IP}/api/v1/auth/login -> HTTP ${LOGIN_CODE} (reached Laravel; no credentials were sent)"
+else
+  check_fail "POST http://${API_PRIVATE_IP}/api/v1/auth/login -> HTTP ${LOGIN_CODE} (unexpected)"
+fi
+rm -f -- "${LOGIN_BODY}"
 
 echo
 log_info "Summary: ${PASS} passed, ${WARN} warnings, ${FAIL} failed"

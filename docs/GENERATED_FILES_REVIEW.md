@@ -14,7 +14,7 @@
 | `scripts/02-setup-api.sh` | Nginx, PHP 8.3-FPM + extensions, MySQL client, checksum-verified Composer |
 | `scripts/03-deploy-app.sh` | Composer install, perms, storage link, `migrate:status`, caches, Nginx site, maintenance-mode trap |
 | `scripts/04-verify-deployment.sh` | Read-only verification with pass/warn/fail summary |
-| `nginx/api-lms.pmli.co.id.conf` | HTTP-only Laravel server block (PHP-FPM 8.3 socket, only `index.php` executed) |
+| `nginx/api-lms.pmli.co.id.conf` | Laravel server block serving both :80 (private, never redirected) and :443 TLS (PHP-FPM 8.3 socket, only `index.php` executed) |
 | `docs/DEPLOYMENT_RUNBOOK.md` | Phases A–K with rollback checkpoints |
 | `docs/ROLLBACK.md` | Rollback per component; DB rollback requires a backup |
 | `docs/SECURITY_NOTES.md` | Security posture and open items |
