@@ -1,0 +1,25 @@
+# Real env files (secrets). Only *.env.example is tracked.
+env/*.env
+*.env
+!*.env.example
+
+# Local / machine-specific
+*.local
+.DS_Store
+
+# Logs
+*.log
+
+# Database dumps and archives
+*.sql
+*.sql.gz
+*.sql.zip
+*.dump
+*.bak
+
+# Temporary deployment artifacts
+*.tmp
+*.swp
+tmp/
+artifacts/
+deploy-artifacts/
