@@ -214,6 +214,37 @@ git pull
 sudo ./scripts/05-update-api-nginx.sh
 ```
 
+## Frontend VM (`pmli-app-02-frontend`) — Nginx + API proxy
+
+This repo previously had no Frontend VM config at all. `nginx/lms.pmli.co.id.conf` serves the frontend's static
+production build and reverse-proxies `/api/` to the API over the private network
+(`http://192.168.50.50/api/...`, already confirmed working — a direct `POST /api/v1/auth/login` with no
+credentials returns Laravel's own 422 validation JSON), so the browser only ever talks to `lms.pmli.co.id` and
+never sees the API's private IP. **This does not touch the API VM or its deployment in any way.**
+
+Before the first run, copy `env/frontend.env.example` to `env/frontend.env` and fill in the values this repo could
+not confirm on its own — see the Appendix entry below and the comments in `env/frontend.env.example` /
+`nginx/lms.pmli.co.id.conf` for exactly what to verify (build directory, whether TLS actually terminates at this
+Nginx). `scripts/06-update-frontend-nginx.sh` refuses to run rather than guess any of them.
+
+```bash
+cd ~/pmli-deployment
+git pull
+sudo ./scripts/06-update-frontend-nginx.sh
+```
+
+Then verify the proxy path (works with or without the frontend site installed yet — the proxied check is skipped
+with a warning, not a failure, if it isn't):
+
+```bash
+sudo ./scripts/07-verify-frontend-api.sh
+```
+
+Same behavior as `scripts/05-update-api-nginx.sh`: Nginx-only, backs up the existing installed config, rolls back
+automatically if `nginx -t` fails (never reloads on a failed test), reloads Nginx on success, safe to run
+repeatedly. Never runs `npm install`/`npm run build`/Composer/`php artisan`/migrations, never touches the database,
+never restarts the API or PHP-FPM, and never issues or modifies a TLS certificate/key.
+
 ---
 
 ## Appendix — Items pending confirmation
@@ -223,3 +254,13 @@ sudo ./scripts/05-update-api-nginx.sh
   scripts. Review and narrow these privileges after production stabilization.
 - **Upload limit.** Nginx `client_max_body_size 20M` is **TEMPORARY / REQUIRES APPLICATION TEAM CONFIRMATION.**
   PHP `upload_max_filesize` / `post_max_size` are not set by these scripts.
+- **Frontend VM details — none of these were confirmable from this repo; all need a human to fill in
+  `env/frontend.env`:**
+  - `FRONTEND_DIR` — the real production build path (e.g. a Vite/Vue `dist/` directory).
+  - `FRONTEND_PRIVATE_IP` — not required by the scripts, informational only; fill in once known.
+  - Whether TLS for `lms.pmli.co.id` actually terminates at this Nginx (`FRONTEND_TLS_CERT_PATH`/
+    `FRONTEND_TLS_KEY_PATH`), or upstream of it (a load balancer/CDN) — `nginx/lms.pmli.co.id.conf` assumes the
+    former, mirroring `api-lms.pmli.co.id.conf`. If that's wrong, the `:443 ssl` listener and `ssl_*` directives
+    need to come out before first use.
+  - Whether the production build is genuinely a client-side-routed SPA (`try_files ... /index.html` fallback) —
+    confirm before relying on it.
