@@ -245,6 +245,58 @@ automatically if `nginx -t` fails (never reloads on a failed test), reloads Ngin
 repeatedly. Never runs `npm install`/`npm run build`/Composer/`php artisan`/migrations, never touches the database,
 never restarts the API or PHP-FPM, and never issues or modifies a TLS certificate/key.
 
+## Course Video uploads (object storage, ~500 MB)
+
+Course Video uploads still travel **browser → frontend Nginx → API Nginx → PHP-FPM → Eranyacloud S3**, so object
+storage does not bypass any HTTP limit. Every hop must allow the file:
+
+| Layer | Value | Where |
+|-------|-------|-------|
+| Laravel business limit | `COURSE_VIDEO_MAX_KB=512000` (~500 MB) | backend `.env` (application-owned) |
+| PHP-FPM `upload_max_filesize` | `512M` | `php/99-pmli-uploads.ini` (installed by `03-deploy-app.sh`, FPM `conf.d` only) |
+| PHP-FPM `post_max_size` | `600M` (must stay > `upload_max_filesize`) | same file |
+| API Nginx `client_max_body_size` | `600m` | `nginx/api-lms.pmli.co.id.conf` |
+| Frontend Nginx `client_max_body_size` | `600m` | `nginx/lms.pmli.co.id.conf` (a lower value rejects uploads with 413 before they reach the API) |
+
+`memory_limit` is unchanged on purpose (PHP streams uploads to a temp file).
+
+**Applying (requires explicit approval; nothing is applied automatically):** `sudo ./scripts/03-deploy-app.sh` on the API
+VM (installs the ini, restarts FPM, reloads Nginx) and `sudo ./scripts/06-update-frontend-nginx.sh` on the Frontend VM.
+Confirm with `sudo ./scripts/04-verify-deployment.sh`, which reads FPM's *effective* values via `php-fpm8.3 -i`. The CLI
+`php -i` uses a different ini and proves nothing about the web runtime.
+
+### Timeouts — 300 s applied in repo (not deployed)
+
+Nginx buffers the whole request body to disk before forwarding (`fastcgi_request_buffering` / `proxy_request_buffering`
+default to on), so upload time itself is bounded only by `client_body_timeout` (60 s *between reads*, not total) and is
+fine. The risk is the wait **after** the body arrives, while Laravel streams ~500 MB to Eranyacloud: the API
+`fastcgi_read_timeout 60s` and the frontend proxy default `proxy_read_timeout 60s` both fire after 60 s of silence. 60 s
+only holds if the API VM sustains ≥ ~8.5 MB/s (~70 Mbps) to the bucket. Minimum safe increase, to be confirmed by a timed
+test upload of a ~500 MB file. Set in the repo: `fastcgi_read_timeout 300s;` (API `location = /index.php`) and `proxy_read_timeout 300s;`
+(frontend `location /api/`). `max_execution_time` counts CPU time on Linux (not network waits) and
+`request_terminate_timeout` defaults to off, so neither needs changing unless the audit shows otherwise. Ensure spare disk
+for the buffered body (~600 MB per concurrent upload) in `/var/lib/nginx` on **both** VMs (the frontend VM's size is unknown).
+
+### Object-storage environment (names only; values live in the application `.env`, never in this repo)
+
+`AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, `AWS_DEFAULT_REGION=us-east-1`, `AWS_BUCKET=bucket-codeid`,
+`AWS_ENDPOINT=https://jkt-2.s3.eranyacloud.id`, `AWS_USE_PATH_STYLE_ENDPOINT=true`, `COURSE_VIDEO_DISK=s3`,
+`COURSE_VIDEO_MAX_KB=512000`, `COURSE_VIDEO_URL_TTL=300`. The scripts only read `.env`; they never write these.
+After any `.env` change run `sudo ./scripts/03-deploy-app.sh` (it runs `config:clear`, then `config:cache`), or manually
+`sudo -u www-data php artisan config:clear && sudo -u www-data php artisan config:cache`, so Laravel never keeps a stale
+disk configuration.
+
+### Existing videos: local → s3 (manual, BEFORE switching `COURSE_VIDEO_DISK`)
+
+1. **Audit (read-only):** list Video rows and their stored paths (the application team supplies the query/table) and the
+   local files under the old disk root (`find <local-root>/courses/materials/videos -type f`). Reconcile rows vs files;
+   note orphans and missing files.
+2. **Copy** each file **preserving the exact key** `courses/materials/videos/<filename>` into bucket `bucket-codeid`
+   (e.g. `aws s3 cp --endpoint-url https://jkt-2.s3.eranyacloud.id`). Do not rename.
+3. **Verify** every key exists on S3 with matching size (and checksum where available).
+4. Only then set `COURSE_VIDEO_DISK=s3` and rebuild the config cache as above.
+5. **Do not delete local originals in the same deployment**; remove them later in a separately approved step.
+
 ---
 
 ## Appendix — Items pending confirmation
@@ -252,8 +304,9 @@ never restarts the API or PHP-FPM, and never issues or modifies a TLS certificat
 - **DB DDL privileges.** `pmli_app` currently holds `CREATE, ALTER, DROP, INDEX, REFERENCES` on `pmli_lms.*`. They are
   retained only so migrations can be run **manually** later. Migrations are **never** run automatically by these
   scripts. Review and narrow these privileges after production stabilization.
-- **Upload limit.** Nginx `client_max_body_size 20M` is **TEMPORARY / REQUIRES APPLICATION TEAM CONFIRMATION.**
-  PHP `upload_max_filesize` / `post_max_size` are not set by these scripts.
+- **Upload limit.** Superseded — see "Course Video uploads" above (Nginx 600m, PHP 512M/600M; Laravel enforces ~500 MB
+  via `COURSE_VIDEO_MAX_KB`).
+- **Upload timeouts.** 300 s is set in the repo (API `fastcgi_read_timeout`, frontend `/api/` `proxy_read_timeout`) but not yet deployed; confirm with a timed ~500 MB test upload.
 - **Frontend VM details — none of these were confirmable from this repo; all need a human to fill in
   `env/frontend.env`:**
   - `FRONTEND_DIR` — the real production build path (e.g. a Vite/Vue `dist/` directory).

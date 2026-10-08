@@ -38,7 +38,7 @@
 - Ubuntu 22.04 on both VMs; scripts run as root via `sudo`; `mysql` root uses default `auth_socket`.
 - Laravel serves from `/var/www/pmli-backend/public`; `SESSION_DRIVER=file` is recommended for the initial deployment; cache/queue settings are owned by the application (see Pre-production corrections).
 - Granted DDL privileges (`CREATE, ALTER, DROP, INDEX, REFERENCES`) are retained for manual migrations; to be narrowed after stabilization.
-- `client_max_body_size 20M` is TEMPORARY / REQUIRES APPLICATION TEAM CONFIRMATION; PHP `upload_max_filesize`/`post_max_size` are not tuned by these scripts.
+- `client_max_body_size` is now 600m on both Nginx configs (Course Video uploads); PHP limits are set by `php/99-pmli-uploads.ini`. Upload timeouts are a recommendation only.
 - `03-deploy-app.sh` runs Composer as root (`COMPOSER_ALLOW_SUPERUSER=1`) so `vendor/` stays non-writable by the web user; the checkout owner is whoever cloned it.
 - Unset `SESSION_DRIVER` in Laravel 13 defaults to `database`; the runbook requires setting `file` explicitly.
 
@@ -76,8 +76,22 @@ disposable Ubuntu 22.04 VMs before production use.
 4. DDL privileges (`CREATE, ALTER, DROP, INDEX, REFERENCES`) kept unchanged. Documented in `docs/SECURITY_NOTES.md`, the
    runbook appendix and a SQL comment in `scripts/01-setup-db.sh`: retained so migrations can be run manually later;
    migrations are never automatic; review and narrow after production stabilization.
-5. `nginx/api-lms.pmli.co.id.conf`: `client_max_body_size 20M` retained; comment now marks it
+5. (Superseded by "Course Video upload limits" below) `client_max_body_size` was 20M; was marked
    TEMPORARY / REQUIRES APPLICATION TEAM CONFIRMATION (also in the runbook appendix). No replacement limit invented.
 6. Scripts: `03-deploy-app.sh` and `04-verify-deployment.sh` only *read* `SESSION_DRIVER` (warn if not `file`). No script
    reads, defaults or writes `CACHE_STORE` or `QUEUE_CONNECTION`.
 7. `bash -n scripts/*.sh scripts/lib/*.sh` re-run: all passed. No infrastructure commands were executed.
+
+## Course Video upload limits (repo changes only; nothing deployed or restarted)
+
+- `nginx/api-lms.pmli.co.id.conf`: `client_max_body_size` 520M → **600m**; stale "20M placeholder" comment replaced.
+- `nginx/lms.pmli.co.id.conf` (frontend proxy in front of the API): `client_max_body_size` 20M → **600m**. This was the
+  tightest hop on the real upload path and would have returned 413 before the API was reached.
+- New `php/99-pmli-uploads.ini`: `upload_max_filesize=512M`, `post_max_size=600M`; `memory_limit` untouched.
+- `scripts/03-deploy-app.sh`: installs that ini to `/etc/php/<ver>/fpm/conf.d/` (backup, `php-fpm -t`, rollback on failure)
+  before the existing FPM restart. CLI php.ini is not touched.
+- `scripts/04-verify-deployment.sh`: read-only check of FPM's effective `upload_max_filesize`/`post_max_size` and of
+  `client_max_body_size` in `nginx -T`.
+- `docs/DEPLOYMENT_RUNBOOK.md`: new "Course Video uploads" section (limits table, timeout recommendation, env var names,
+  config-cache rebuild, local→s3 migration procedure); appendix updated.
+- Timeouts: API `fastcgi_read_timeout` 60s → 300s and frontend `/api/` `proxy_read_timeout` 60s (default) → 300s (follow-up task). `proxy_send_timeout`, `fastcgi_send_timeout`, `max_execution_time`, `request_terminate_timeout`, `memory_limit` unchanged.

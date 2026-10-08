@@ -151,6 +151,24 @@ fi
 as_web php artisan about >/dev/null || die "Laravel failed to boot (php artisan about)."
 log_ok "Laravel boots correctly."
 
+# --- PHP-FPM upload limits (FPM conf.d only; CLI php.ini untouched) ----------
+PHP_INI_SRC="${REPO_DIR}/php/99-pmli-uploads.ini"
+PHP_INI_DST="/etc/php/${PHP_VERSION}/fpm/conf.d/99-pmli-uploads.ini"
+require_file "${PHP_INI_SRC}" "PHP upload limits ini"
+[[ -d "/etc/php/${PHP_VERSION}/fpm/conf.d" ]] || die "/etc/php/${PHP_VERSION}/fpm/conf.d not found (is php${PHP_VERSION}-fpm installed?)."
+if [[ -f "${PHP_INI_DST}" ]] && cmp -s "${PHP_INI_SRC}" "${PHP_INI_DST}"; then
+  log_ok "PHP-FPM upload limits already installed."
+else
+  PHP_INI_HAD=0
+  if [[ -f "${PHP_INI_DST}" ]]; then PHP_INI_HAD=1; backup_file "${PHP_INI_DST}"; PHP_INI_BACKUP="${BACKUP_LAST_PATH}"; fi
+  install -m 0644 -o root -g root "${PHP_INI_SRC}" "${PHP_INI_DST}"
+  if ! "php-fpm${PHP_VERSION}" -t; then
+    if (( PHP_INI_HAD )); then cp -a -- "${PHP_INI_BACKUP}" "${PHP_INI_DST}"; else rm -f -- "${PHP_INI_DST}"; fi
+    die "php-fpm${PHP_VERSION} -t failed with the new upload ini; rolled back."
+  fi
+  log_ok "Installed ${PHP_INI_DST} (takes effect on the FPM restart below)."
+fi
+
 # --- PHP-FPM -----------------------------------------------------------------
 safe_systemctl_restart "php${PHP_VERSION}-fpm"
 

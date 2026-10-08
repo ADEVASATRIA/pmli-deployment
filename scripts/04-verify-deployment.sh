@@ -106,6 +106,20 @@ if [[ -f "${APP_DIR}/artisan" && -f "${APP_DIR}/vendor/autoload.php" ]]; then
   fi
 fi
 
+# --- Effective PHP-FPM upload limits (read-only; FPM's own ini, not the CLI's) ---
+if command -v "php-fpm${PHP_VERSION}" >/dev/null 2>&1; then
+  FPM_INFO="$("php-fpm${PHP_VERSION}" -i 2>/dev/null || true)"
+  for pair in upload_max_filesize:512M post_max_size:600M; do
+    k="${pair%%:*}"; want="${pair##*:}"
+    got="$(awk -F' => ' -v k="${k}" '$1==k {print $2; exit}' <<<"${FPM_INFO}")"
+    if [[ "${got}" == "${want}" ]]; then check_pass "PHP-FPM ${k}=${got}"; else check_warn "PHP-FPM ${k}='${got}' (expected ${want} for Course Video uploads)"; fi
+  done
+else
+  check_warn "php-fpm${PHP_VERSION} binary not found; cannot read effective upload limits"
+fi
+NGX_LIMIT="$(nginx -T 2>/dev/null | grep -E '^\s*client_max_body_size' | sort -u | tr -s ' ' | tr '\n' ' ' || true)"
+check_pass "Nginx client_max_body_size in effect: ${NGX_LIMIT:-<default 1m>}"
+
 # --- HTTP --------------------------------------------------------------------
 http_code() { curl -sS -o /dev/null -w '%{http_code}' --max-time 10 "$@" 2>/dev/null || echo 000; }
 CODE="$(http_code http://127.0.0.1/)"
