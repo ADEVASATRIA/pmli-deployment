@@ -86,3 +86,10 @@ Full detail: [docs/DEPLOYMENT_RUNBOOK.md](docs/DEPLOYMENT_RUNBOOK.md).
 - [Rollback](docs/ROLLBACK.md)
 - [Security notes](docs/SECURITY_NOTES.md)
 - [Generated files review](docs/GENERATED_FILES_REVIEW.md)
+
+## Security check (php2shell, read-only)
+
+`scripts/security/check-php2shell.sh [/var/www/pmli-backend ...]` inspects PHP versions per SAPI (CLI, FPM, Apache, Nginx mapping,
+Docker, FrankenPHP/LiteSpeed) against CVE-2026-109618/109619 fixed versions, plus light compromise indicators. It changes nothing,
+uses `sudo -n` only if available (otherwise prints `SKIP (butuh sudo)`), and writes `reports/php2shell-<host>-<time>.txt` (git-ignored).
+Run on each VM: `./scripts/security/check-php2shell.sh /var/www/pmli-backend`.

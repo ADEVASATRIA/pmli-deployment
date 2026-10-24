@@ -23,3 +23,6 @@ env/*.env
 tmp/
 artifacts/
 deploy-artifacts/
+
+# Security audit reports (may contain host details)
+reports/
