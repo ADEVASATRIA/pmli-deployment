@@ -93,3 +93,17 @@ Full detail: [docs/DEPLOYMENT_RUNBOOK.md](docs/DEPLOYMENT_RUNBOOK.md).
 Docker, FrankenPHP/LiteSpeed) against CVE-2026-109618/109619 fixed versions, plus light compromise indicators. It changes nothing,
 uses `sudo -n` only if available (otherwise prints `SKIP (butuh sudo)`), and writes `reports/php2shell-<host>-<time>.txt` (git-ignored).
 Run on each VM: `./scripts/security/check-php2shell.sh /var/www/pmli-backend`.
+
+## Backend update (interactive)
+
+`scripts/update-api.sh [/var/www/pmli-backend] [--backup-tables "a b"]` updates an already-deployed backend: `git pull --ff-only`,
+`composer install --no-dev`, DB backup to `~/backups/`, shows pending migrations + `migrate --pretend`, asks `y/N`, then
+maintenance mode → `migrate --force` → caches → `queue:restart` → PHP-FPM restart. git/composer/artisan run as the folder owner (never root);
+`artisan up` is guaranteed on failure. Unlike `03-deploy-app.sh`, it pulls code and migrates (only after your confirmation).
+
+## Frontend update (Vue/Vite)
+
+`scripts/update-frontend.sh /path/to/frontend-repo` (on the Frontend VM): checks node/npm vs `engines`, `git pull --ff-only`, lists `VITE_*` key
+names, `npm ci && npm run build`, validates `dist/`, then releases atomically into `<FRONTEND_DIR parent>/releases/<timestamp>` and swaps the
+`FRONTEND_DIR` symlink (keeps 3 releases; first run converts a real directory once). Web root/domain come from `env/frontend.env`, as in script 06.
+Roll back with `./scripts/update-frontend.sh --rollback`; add `--reload-nginx` only after Nginx config changes.
