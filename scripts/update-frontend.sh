@@ -26,12 +26,13 @@ REPO_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
 # shellcheck source=lib/common.sh
 source "${SCRIPT_DIR}/lib/common.sh"
 
-ENV_FILE="${REPO_DIR}/env/frontend.env"; FE_REPO=""; ROLLBACK=0; RELOAD=0; KEEP=3
+ENV_FILE="${REPO_DIR}/env/frontend.env"; FE_REPO=""; ROLLBACK=0; RELOAD=0; KEEP=3; RELEASE=""
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --env) [[ $# -ge 2 ]] || die "--env needs a path"; ENV_FILE="$2"; shift 2 ;;
     --rollback) ROLLBACK=1; shift ;;
     --reload-nginx) RELOAD=1; shift ;;
+    --release) [[ $# -ge 2 ]] || die "--release needs a manifest file"; RELEASE="$2"; shift 2 ;;
     -h|--help) sed -n '2,20p' "${BASH_SOURCE[0]}"; exit 0 ;;
     -*) die "Unknown option: $1" ;;
     *) [[ -z "${FE_REPO}" ]] || die "Only one repo path is accepted."; FE_REPO="${1%/}"; shift ;;
@@ -41,6 +42,16 @@ done
 require_command sudo; require_command curl
 load_env_file "${ENV_FILE}"
 for v in FRONTEND_DIR FRONTEND_DOMAIN; do require_var "${v}"; done
+# Release manifest (KEY="value"): EXPECT_COMMIT, SPA_ROUTES, REQUIRE_HTTPS
+EXPECT_COMMIT=""; SPA_ROUTES=""; REQUIRE_HTTPS="0"
+if [[ -n "${RELEASE}" ]]; then
+  unset EXPECT_COMMIT SPA_ROUTES REQUIRE_HTTPS
+  load_env_file "${RELEASE}"
+  EXPECT_COMMIT="${EXPECT_COMMIT:-}"; SPA_ROUTES="${SPA_ROUTES:-}"; REQUIRE_HTTPS="${REQUIRE_HTTPS:-0}"
+  [[ -z "${EXPECT_COMMIT}" || "${EXPECT_COMMIT}" =~ ^[0-9a-fA-F]{7,40}$ ]] || die "Manifest: EXPECT_COMMIT must be a 7-40 char hex commit id."
+  [[ "${REQUIRE_HTTPS}" =~ ^[01]$ ]] || die "Manifest: REQUIRE_HTTPS must be 0 or 1."
+  for r in ${SPA_ROUTES}; do [[ "${r}" =~ ^/[A-Za-z0-9/_.-]*$ ]] || die "Manifest: invalid SPA route '${r}'."; done
+fi
 WEB="${FRONTEND_DIR%/}"
 [[ "${WEB}" != "" && "${WEB}" != "/" ]] || die "FRONTEND_DIR is unsafe: '${FRONTEND_DIR}'"
 RELEASES="$(dirname "${WEB}")/releases"
@@ -66,7 +77,7 @@ summary() {
   cur="$(current_release)"
   while read -r n; do
     if (( found )); then prev="${n}"; break; fi
-    [[ "${n}" == "${cur}" ]] && found=1
+    if [[ "${n}" == "${cur}" ]]; then found=1; fi
   done < <(list_releases)
   echo; log_info "=== update-frontend.sh summary ==="
   log_info "Commit:          ${1:-n/a}"
@@ -81,7 +92,7 @@ if (( ROLLBACK )); then
   CUR="$(current_release)"; PREV=""; found=0
   while read -r n; do
     if (( found )); then PREV="${n}"; break; fi
-    [[ "${n}" == "${CUR}" ]] && found=1
+    if [[ "${n}" == "${CUR}" ]]; then found=1; fi
   done < <(list_releases)
   [[ -n "${PREV}" ]] || die "No release older than '${CUR}' in ${RELEASES}."
   [[ -f "${RELEASES}/${PREV}/index.html" ]] || die "Previous release ${PREV} has no index.html; refusing."
@@ -158,10 +169,42 @@ check_engine node "${NODE_V}" "${ENG_NODE}"; check_engine npm "${NPM_V}" "${ENG_
 
 # 2. git pull ---------------------------------------------------------------
 BEFORE="$(run_as git rev-parse --short HEAD)"
-log_info "git pull --ff-only (branch $(run_as git rev-parse --abbrev-ref HEAD)) ..."
-run_as git pull --ff-only
+BRANCH="$(run_as git rev-parse --abbrev-ref HEAD)"
+log_info "git fetch (branch ${BRANCH}) ..."
+run_as git fetch
+INCOMING="$(run_as git log --oneline 'HEAD..@{u}')" || die "Branch ${BRANCH} has no upstream; set one before updating."
+if [[ -z "${INCOMING}" ]]; then
+  log_info "No new commits upstream (HEAD ${BEFORE})."
+else
+  log_info "Commits that will be pulled:"; printf '%s\n' "${INCOMING}" | sed 's/^/    /'
+  [[ -t 0 ]] || die "Confirmation needed but no terminal available."
+  read -r -p "Pull these commits into ${FE_REPO}? [y/N] " ANS
+  [[ "${ANS}" =~ ^[yY]$ ]] || die "Dibatalkan oleh operator. Tidak ada perubahan; web root tidak disentuh."
+  run_as git pull --ff-only
+fi
 AFTER="$(run_as git rev-parse --short HEAD)"
 log_ok "Commit: ${BEFORE} -> ${AFTER}"
+if [[ -n "${EXPECT_COMMIT}" ]]; then
+  run_as git merge-base --is-ancestor "${EXPECT_COMMIT}" HEAD \
+    || die "Expected commit ${EXPECT_COMMIT} is NOT contained in HEAD (${AFTER}). Stopping before build."
+  log_ok "HEAD contains expected commit ${EXPECT_COMMIT}."
+fi
+
+# 2b. Pre-flight (warnings only) ----------------------------------------------------
+PF_SITE="/etc/nginx/sites-available/${FRONTEND_DOMAIN}.conf"
+if [[ -r "${PF_SITE}" ]]; then
+  if grep -Eq 'try_files[^;]*/index\.html' "${PF_SITE}"; then log_ok "pre-flight: Nginx SPA fallback (try_files ... /index.html) present."
+  else log_warn "pre-flight: ${PF_SITE} has no try_files fallback to /index.html - deep links like /trainer will 404."; fi
+  if [[ "${REQUIRE_HTTPS}" == "1" ]]; then
+    if grep -Eq 'listen[^;]*(443[^;]*ssl|ssl[^;]*443)' "${PF_SITE}"; then log_ok "pre-flight: site listens on 443 ssl."; else log_warn "pre-flight: REQUIRE_HTTPS=1 but ${PF_SITE} has no 'listen 443 ssl'."; fi
+  fi
+else
+  log_warn "pre-flight: cannot read ${PF_SITE}; SPA fallback / 443 listener not checked."
+fi
+if [[ "${REQUIRE_HTTPS}" == "1" ]]; then
+  C="$(http_code --resolve "${FRONTEND_DOMAIN}:443:127.0.0.1" "https://${FRONTEND_DOMAIN}/")"
+  if [[ "${C}" != "000" ]]; then log_ok "pre-flight: HTTPS to ${FRONTEND_DOMAIN} works (HTTP ${C})."; else log_warn "pre-flight: HTTPS request to ${FRONTEND_DOMAIN} failed (TLS/connect error)."; fi
+fi
 
 # 3. Build env file + VITE_* key NAMES only ------------------------------------
 ENVS=()
@@ -236,6 +279,13 @@ fi
 
 # 9. Summary -----------------------------------------------------------------------------
 summary "${BEFORE} -> ${AFTER}"
+ROUTE_FAIL=""
+for r in ${SPA_ROUTES}; do
+  if [[ "${REQUIRE_HTTPS}" == "1" ]]; then C="$(http_code --resolve "${FRONTEND_DOMAIN}:443:127.0.0.1" "https://${FRONTEND_DOMAIN}${r}")"
+  else C="$(http_code -H "Host: ${FRONTEND_DOMAIN}" "http://127.0.0.1${r}")"; fi
+  if [[ "${C}" == "200" ]]; then log_ok "SPA route ${r} -> HTTP 200"; else log_error "SPA route ${r} -> HTTP ${C} (expected 200)"; ROUTE_FAIL="${ROUTE_FAIL} ${r}"; fi
+done
+[[ -z "${ROUTE_FAIL}" ]] || die "SPA route check failed for:${ROUTE_FAIL}. Roll back with: ./scripts/update-frontend.sh --rollback"
 CODE="$(http_code -H "Host: ${FRONTEND_DOMAIN}" http://127.0.0.1/)"
 [[ "${CODE}" =~ ^[23] ]] || log_warn "Main page returned HTTP ${CODE}. Roll back with: ./scripts/update-frontend.sh --rollback"
 log_ok "Frontend update finished."

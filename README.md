@@ -107,3 +107,11 @@ maintenance mode → `migrate --force` → caches → `queue:restart` → PHP-FP
 names, `npm ci && npm run build`, validates `dist/`, then releases atomically into `<FRONTEND_DIR parent>/releases/<timestamp>` and swaps the
 `FRONTEND_DIR` symlink (keeps 3 releases; first run converts a real directory once). Web root/domain come from `env/frontend.env`, as in script 06.
 Roll back with `./scripts/update-frontend.sh --rollback`; add `--reload-nginx` only after Nginx config changes.
+
+## Rilis dengan manifest
+
+Tiap rilis punya folder `releases/<tanggal>/` berisi `api.conf` dan `frontend.conf` (format `KEY="value"`, tanpa secret). Dengan
+`--release FILE`, `update-api.sh` hanya menjalankan migration yang tercantum di `MIGRATIONS` (per file via `migrate --path`), memverifikasi
+`EXPECT_COMMIT` setelah pull, mem-backup `BACKUP_TABLES` (koneksi default) dan `BACKUP_LEGACY_TABLES` (koneksi `legacy`), serta menjalankan
+pre-flight upload (`MIN_UPLOAD_MB`). Migration pending di luar manifest, atau pending apa pun tanpa `--release`, menghentikan update.
+`update-frontend.sh --release` memeriksa `EXPECT_COMMIT`, SPA fallback/HTTPS, dan status 200 tiap `SPA_ROUTES` setelah rilis. Lihat `releases/2026-11-04/README.md`.
