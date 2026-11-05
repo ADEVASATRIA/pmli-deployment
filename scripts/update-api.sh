@@ -16,6 +16,7 @@
 #                  any other pending migration stops the update. Without --release,
 #                  ANY pending migration stops the update (no automatic `migrate`).
 # --backup-tables  overrides BACKUP_TABLES (empty = whole database).
+#                  With --release and empty MIGRATIONS (and no --backup-tables), backups are skipped.
 # --swagger        run l5-swagger:generate at the very end, non-fatal (skipped if absent).
 #
 # Differs from 03-deploy-app.sh: this one pulls code and, after you type y,
@@ -216,9 +217,14 @@ backup_conn() {
   log_ok "Backup written: ${LAST_BACKUP} ($(du -h "${LAST_BACKUP}" | cut -f1))"
 }
 
-backup_conn "" "${TABLES}" ""; BACKUP="${LAST_BACKUP}"
-BACKUP_LEGACY="not requested"
-if [[ -n "${BACKUP_LEGACY_TABLES}" ]]; then backup_conn "legacy" "${BACKUP_LEGACY_TABLES}" "legacy-"; BACKUP_LEGACY="${LAST_BACKUP}"; fi
+if [[ -n "${RELEASE}" && -z "${MIGRATIONS//[[:space:]]/}" ]] && (( ! TABLES_SET )); then
+  log_info "Tidak ada migration di manifest; backup dilewati."
+  BACKUP="skipped (no migrations)"; BACKUP_LEGACY="skipped (no migrations)"
+else
+  backup_conn "" "${TABLES}" ""; BACKUP="${LAST_BACKUP}"
+  BACKUP_LEGACY="not requested"
+  if [[ -n "${BACKUP_LEGACY_TABLES}" ]]; then backup_conn "legacy" "${BACKUP_LEGACY_TABLES}" "legacy-"; BACKUP_LEGACY="${LAST_BACKUP}"; fi
+fi
 
 # --- 4. Migration plan (only manifest migrations, always via --path) -----------
 STATUS="$(run_as php artisan migrate:status --no-ansi)" || die "migrate:status failed (DB connection? new code may need composer install)."
