@@ -11,7 +11,10 @@
 # Env:    PHP_VERSION=8.3   WEB_USER=www-data
 #
 # --release FILE   manifest (KEY="value": EXPECT_COMMIT, MIGRATIONS, BACKUP_TABLES,
-#                  BACKUP_LEGACY_TABLES, MIN_UPLOAD_MB), e.g. releases/2026-11-04/api.conf.
+#                  BACKUP_LEGACY_TABLES, MIN_UPLOAD_MB; optional: REQUIRE_PHP_EXT="zip ..."
+#                  (checked in php -m CLI + FPM), REQUIRE_SCHEDULER="1" (schedule:run in
+#                  a crontab / cron.d)), e.g. releases/2026-11-10/api.conf. The extra
+#                  pre-flight checks only warn. CACHE_STORE=array/null in .env also warns.
 #                  Only the migrations listed there are ever run (migrate --path=<file>);
 #                  any other pending migration stops the update. Without --release,
 #                  ANY pending migration stops the update (no automatic `migrate`).
@@ -37,7 +40,7 @@ while [[ $# -gt 0 ]]; do
     --backup-tables) [[ $# -ge 2 ]] || die "--backup-tables needs a value, e.g. \"users courses\""; TABLES="$2"; TABLES_SET=1; shift 2 ;;
     --release) [[ $# -ge 2 ]] || die "--release needs a manifest file"; RELEASE="$2"; shift 2 ;;
     --swagger) SWAGGER=1; shift ;;
-    -h|--help) sed -n '2,24p' "${BASH_SOURCE[0]}"; exit 0 ;;
+    -h|--help) awk 'NR>1 && /^#/ {print; next} NR>1 {exit}' "${BASH_SOURCE[0]}"; exit 0 ;;
     -*) die "Unknown option: $1" ;;
     *) (( POS == 0 )) || die "Only one APP_DIR is accepted."; APP="${1%/}"; POS=1; shift ;;
   esac
@@ -46,11 +49,15 @@ done
 
 # --- Manifest ----------------------------------------------------------------
 EXPECT_COMMIT=""; MIGRATIONS=""; BACKUP_TABLES=""; BACKUP_LEGACY_TABLES=""; MIN_UPLOAD_MB=""
+REQUIRE_PHP_EXT=""; REQUIRE_SCHEDULER=""
 if [[ -n "${RELEASE}" ]]; then
-  unset EXPECT_COMMIT MIGRATIONS BACKUP_TABLES BACKUP_LEGACY_TABLES MIN_UPLOAD_MB
+  unset EXPECT_COMMIT MIGRATIONS BACKUP_TABLES BACKUP_LEGACY_TABLES MIN_UPLOAD_MB REQUIRE_PHP_EXT REQUIRE_SCHEDULER
   load_env_file "${RELEASE}"
   EXPECT_COMMIT="${EXPECT_COMMIT:-}"; MIGRATIONS="${MIGRATIONS:-}"; BACKUP_TABLES="${BACKUP_TABLES:-}"
   BACKUP_LEGACY_TABLES="${BACKUP_LEGACY_TABLES:-}"; MIN_UPLOAD_MB="${MIN_UPLOAD_MB:-}"
+  REQUIRE_PHP_EXT="${REQUIRE_PHP_EXT:-}"; REQUIRE_SCHEDULER="${REQUIRE_SCHEDULER:-}"
+  for t in ${REQUIRE_PHP_EXT}; do [[ "${t}" =~ ^[A-Za-z0-9_]+$ ]] || die "Manifest: invalid PHP extension name '${t}'."; done
+  [[ -z "${REQUIRE_SCHEDULER}" || "${REQUIRE_SCHEDULER}" =~ ^[01]$ ]] || die "Manifest: REQUIRE_SCHEDULER must be 0 or 1."
   [[ -z "${EXPECT_COMMIT}" || "${EXPECT_COMMIT}" =~ ^[0-9a-fA-F]{7,40}$ ]] || die "Manifest: EXPECT_COMMIT must be a 7-40 char hex commit id."
   [[ -z "${MIN_UPLOAD_MB}" || "${MIN_UPLOAD_MB}" =~ ^[0-9]+$ ]] || die "Manifest: MIN_UPLOAD_MB must be a number."
   for p in ${MIGRATIONS}; do
@@ -89,10 +96,25 @@ ask_yn() { # $1 = prompt ; returns 0 on y/Y, dies if no terminal
 
 # --- Cleanup: temp credentials + guaranteed `artisan up` ----------------------
 MAINT=0; CNF=""
+# fix_permissions - files artisan/composer created must stay usable by PHP-FPM
+# (owner = deploy user, group = WEB_USER, group rwX, setgid dirs).
+fix_permissions() {
+  local d rc=0
+  for d in "${APP}/storage" "${APP}/bootstrap/cache"; do
+    [[ -d "${d}" ]] || continue
+    priv chown -R "${OWNER}:${WEB_USER}" "${d}" || rc=1
+    priv chmod -R ug+rwX "${d}" || rc=1
+    priv find "${d}" -type d -exec chmod g+s {} + || rc=1
+  done
+  (( rc == 0 )) && log_ok "Permissions fixed (storage, bootstrap/cache: ${OWNER}:${WEB_USER}, ug+rwX, setgid dirs)." \
+    || log_warn "fix_permissions had errors; check ownership of ${APP}/storage and ${APP}/bootstrap/cache."
+  return "${rc}"
+}
 on_exit() {
   local rc=$?
   [[ -z "${CNF}" ]] || rm -f -- "${CNF}"
   if (( MAINT )); then
+    fix_permissions || true
     log_warn "Exiting while in maintenance mode - attempting 'artisan up' ..."
     run_as php artisan up || log_error "FAILED to bring the app up. Run: cd ${APP} && sudo -u ${OWNER} php artisan up"
   fi
@@ -160,8 +182,38 @@ if [[ -n "${MIN_UPLOAD_MB}" ]]; then
   fi
 else log_info "pre-flight: MIN_UPLOAD_MB not set; upload limit checks skipped."; fi
 
+# Optional manifest checks (warnings only)
+if [[ -n "${REQUIRE_PHP_EXT}" ]]; then
+  CLI_MODS="$(run_as php -m 2>/dev/null | tr 'A-Z' 'a-z' || true)"
+  FPM_MODS="$(command -v "php-fpm${PHP_VERSION}" >/dev/null 2>&1 && "php-fpm${PHP_VERSION}" -m 2>/dev/null | tr 'A-Z' 'a-z' || true)"
+  for t in ${REQUIRE_PHP_EXT}; do
+    l="$(tr 'A-Z' 'a-z' <<<"${t}")"
+    if grep -qx "${l}" <<<"${CLI_MODS}"; then pf "PHP ext ${t} (CLI): OK"; else pfw "PHP ext '${t}' missing in CLI (apt install php${PHP_VERSION}-${l})"; fi
+    if [[ -z "${FPM_MODS}" ]]; then pfw "php-fpm${PHP_VERSION} -m unavailable; ext '${t}' not checked for FPM"
+    elif grep -qx "${l}" <<<"${FPM_MODS}"; then pf "PHP ext ${t} (FPM): OK"
+    else pfw "PHP ext '${t}' missing in FPM (apt install php${PHP_VERSION}-${l}; restart php${PHP_VERSION}-fpm)"; fi
+  done
+fi
+if [[ "${REQUIRE_SCHEDULER}" == "1" ]]; then
+  SCHED=""
+  for u in "${OWNER}" "${WEB_USER}" root; do
+    ct="$(sudo -n crontab -l -u "${u}" 2>/dev/null || true)"
+    if grep -q 'schedule:run' <<<"${ct}"; then SCHED="crontab ${u}"; break; fi
+  done
+  if [[ -z "${SCHED}" ]] && grep -qsr 'schedule:run' /etc/cron.d 2>/dev/null; then SCHED="/etc/cron.d"; fi
+  if [[ -n "${SCHED}" ]]; then pf "scheduler: schedule:run found (${SCHED}): OK"
+  else pfw "scheduler: no 'schedule:run' in crontab of ${OWNER}/${WEB_USER}/root or /etc/cron.d (or sudo -n crontab not permitted)"; fi
+fi
+CACHE_STORE_VAL="$(envv CACHE_STORE | tr 'A-Z' 'a-z')"
+case "${CACHE_STORE_VAL}" in
+  array|null) pfw "CACHE_STORE=${CACHE_STORE_VAL} in .env: cache will not persist between requests (use file/redis/database)" ;;
+  "") pf "CACHE_STORE not set in .env (config default applies)" ;;
+  *) pf "CACHE_STORE=${CACHE_STORE_VAL}: OK" ;;
+esac
+
 # --- 3. DB backups (credentials generated by PHP -> temp 0600 file) -----------
-umask 077
+# umask 077 is applied ONLY to the dump file (subshell below); it must not leak
+# into artisan/composer (it once made bootstrap/cache 0600 -> HTTP 500).
 install -d -m 0700 "${HOME}/backups"
 DB_PHP='require "vendor/autoload.php"; $app = require "bootstrap/app.php";
 $app->make(Illuminate\Contracts\Console\Kernel::class)->bootstrap();
@@ -210,7 +262,7 @@ backup_conn() {
   else log_warn "mysql client not found; engine check skipped."; fi
   if [[ -n "${tables}" ]]; then log_info "Backing up [${tables}] from '${dbn}' (connection ${conn:-default}) ..."; else log_warn "No table list: dumping the WHOLE database '${dbn}' (connection ${conn:-default})."; fi
   # shellcheck disable=SC2086  # tables are validated and intentionally word-split
-  mysqldump --defaults-extra-file="${CNF}" --single-transaction --no-tablespaces ${extra[@]+"${extra[@]}"} "${dbn}" ${tables} > "${LAST_BACKUP}"
+  ( umask 077; mysqldump --defaults-extra-file="${CNF}" --single-transaction --no-tablespaces ${extra[@]+"${extra[@]}"} "${dbn}" ${tables} > "${LAST_BACKUP}" )
   rm -f -- "${CNF}"; CNF=""
   [[ -s "${LAST_BACKUP}" ]] || die "Backup file is empty: ${LAST_BACKUP}"
   chmod 600 "${LAST_BACKUP}"
@@ -284,9 +336,19 @@ run_as php artisan optimize:clear
 run_as php artisan config:cache
 run_as php artisan route:cache
 run_as php artisan event:cache || log_warn "event:cache gagal (non-fatal); app tetap dinaikkan."
+fix_permissions || true
 run_as php artisan up
 MAINT=0
 log_ok "Maintenance mode disabled."
+PERM_STATUS="not checked (cannot sudo -n -u ${WEB_USER})"
+if sudo -n -u "${WEB_USER}" true 2>/dev/null; then
+  if sudo -n -u "${WEB_USER}" test -r "${APP}/bootstrap/cache/config.php"; then PERM_STATUS="OK"
+  else
+    log_error "${WEB_USER} cannot read ${APP}/bootstrap/cache/config.php - PHP-FPM would answer HTTP 500. Re-running fix_permissions ..."
+    fix_permissions || true
+    if sudo -n -u "${WEB_USER}" test -r "${APP}/bootstrap/cache/config.php"; then PERM_STATUS="repaired"; else PERM_STATUS="FAILED"; log_error "Still unreadable by ${WEB_USER}: fix ownership/modes of bootstrap/cache manually."; fi
+  fi
+fi
 run_as php artisan queue:restart || log_warn "queue:restart gagal (non-fatal); jalankan manual."
 
 # --- 6. PHP-FPM --------------------------------------------------------------------
@@ -317,9 +379,14 @@ log_info "Migrated:         $(printf '%s' "${DONE}" | grep -c . || true) | skipp
 log_info "Backup (default): ${BACKUP}"
 log_info "Backup (legacy):  ${BACKUP_LEGACY}"
 log_info "Swagger:          ${SWAGGER_STATUS}"
+log_info "Permissions:      ${PERM_STATUS} (bootstrap/cache readable by ${WEB_USER})"
 if [[ -n "${PREFLIGHT}" ]]; then log_info "Pre-flight:"; printf '%s' "${PREFLIGHT}" | sed 's/^/                    /'; fi
 if [[ -n "${BASE}" ]]; then
-  log_info "App status:       ${BASE}/health -> HTTP $(probe /health) | ${BASE}/up -> HTTP $(probe /up)"
+  H_CODE="$(probe /health)"; U_CODE="$(probe /up)"
+  log_info "App status:       ${BASE}/health -> HTTP ${H_CODE} | ${BASE}/up -> HTTP ${U_CODE}"
+  if [[ "${H_CODE}" != "200" || "${U_CODE}" != "200" ]]; then
+    log_warn "/health atau /up bukan HTTP 200. Cek ${APP}/storage/logs/laravel.log dan /var/log/nginx/error.log (sering: izin storage/bootstrap/cache)."
+  fi
 else
   log_warn "APP_URL not set in .env; HTTP status not checked."
 fi
