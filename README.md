@@ -116,3 +116,7 @@ Tiap rilis punya folder `releases/<tanggal>/` berisi `api.conf` dan `frontend.co
 pre-flight upload (`MIN_UPLOAD_MB`). Migration pending di luar manifest, atau pending apa pun tanpa `--release`, menghentikan update.
 `update-frontend.sh --release` memeriksa `EXPECT_COMMIT`, SPA fallback/HTTPS, dan status 200 tiap `SPA_ROUTES` setelah rilis. Lihat `releases/2026-11-04/README.md`.
 Rilis yang memuat migration `ALTER ... ENGINE=InnoDB` tidak bisa di-rollback kecuali dengan me-restore dump backup (DDL MySQL tidak transaksional); jalankan di luar jam sibuk. Tabel MyISAM di-dump dengan `--lock-tables` (kunci baca singkat, user DB perlu hak `LOCK TABLES`).
+
+## Queue worker & scheduler
+
+`sudo ./scripts/setup-workers.sh [/var/www/pmli-backend] [--dry-run]` (API VM, idempotent) membuat `/etc/cron.d/pmli-scheduler` (`schedule:run` tiap menit, hanya bila belum ada di crontab/cron.d) dan unit systemd `pmli-queue.service` (`queue:work database --queue=cen,default`, jalan sebagai web user), lalu `enable --now`. Cek: `systemctl status pmli-queue`, `journalctl -u pmli-queue -n 50`. `update-api.sh` menampilkan status unit setelah `queue:restart`.

@@ -214,10 +214,11 @@ QUEUE_CONN="$(envv QUEUE_CONNECTION | tr 'A-Z' 'a-z')"
 if [[ "${QUEUE_CONN}" == "sync" ]]; then pf "queue worker: QUEUE_CONNECTION=sync, no worker needed"
 else
   QW=""
-  QW_HOW="systemd running services whose ExecStart has 'queue:work'; supervisor programs ([program:*] in /etc/supervisor containing 'queue:work', RUNNING in 'sudo -n supervisorctl status'); process list (pgrep -f 'queue:work')"
+  QW_HOW="systemd unit pmli-queue.service (scripts/setup-workers.sh); systemd running services whose ExecStart has 'queue:work'; supervisor programs ([program:*] in /etc/supervisor containing 'queue:work', RUNNING in 'sudo -n supervisorctl status'); process list (pgrep -f 'queue:work')"
   if command -v systemctl >/dev/null 2>&1; then
+    if systemctl is-active --quiet pmli-queue.service 2>/dev/null; then QW=" systemd:pmli-queue.service"; fi
     while read -r u; do
-      [[ -n "${u}" ]] || continue
+      [[ -n "${u}" && "${u}" != "pmli-queue.service" ]] || continue
       es="$(systemctl show -p ExecStart --value "${u}" 2>/dev/null || true)"
       if grep -q 'queue:work' <<<"${es}"; then QW="${QW} systemd:${u}"; fi
     done < <(systemctl list-units --type=service --state=running --plain --no-legend 2>/dev/null | awk '{print $1}')
@@ -234,7 +235,7 @@ else
   fi
   if [[ -z "${QW}" ]] && pgrep -f 'queue:work' >/dev/null 2>&1; then QW=" process(pgrep queue:work)"; fi
   if [[ -n "${QW}" ]]; then pf "queue worker running via:${QW}"
-  else pfw "no queue worker found - queued jobs (imports, e-mails) will not be processed. Checked: ${QW_HOW}"; fi
+  else pfw "no queue worker found - queued jobs (imports, e-mails) will not be processed (fix: sudo ./scripts/setup-workers.sh). Checked: ${QW_HOW}"; fi
 fi
 
 # --- 3. composer install + config:clear (before backups/migrate:status: new module namespaces need the new autoload, migrations the new config)
@@ -390,6 +391,12 @@ if sudo -n -u "${WEB_USER}" true 2>/dev/null; then
   fi
 fi
 run_as php artisan queue:restart || log_warn "queue:restart gagal (non-fatal); jalankan manual."
+if systemctl cat pmli-queue.service >/dev/null 2>&1; then
+  QS="inactive"
+  for _ in 1 2 3 4 5 6 7 8 9 10; do QS="$(systemctl is-active pmli-queue.service 2>/dev/null || true)"; [[ "${QS}" == "active" ]] && break; sleep 1; done
+  if [[ "${QS}" == "active" ]]; then log_ok "pmli-queue.service: active (worker restarted by queue:restart)."
+  else log_warn "pmli-queue.service is '${QS}' - check: systemctl status pmli-queue ; journalctl -u pmli-queue -n 50"; fi
+fi
 
 # --- 7. PHP-FPM --------------------------------------------------------------------
 priv systemctl restart "php${PHP_VERSION}-fpm"
