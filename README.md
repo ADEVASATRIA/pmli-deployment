@@ -115,3 +115,4 @@ Tiap rilis punya folder `releases/<tanggal>/` berisi `api.conf` dan `frontend.co
 `EXPECT_COMMIT` setelah pull, mem-backup `BACKUP_TABLES` (koneksi default) dan `BACKUP_LEGACY_TABLES` (koneksi `legacy`), serta menjalankan
 pre-flight upload (`MIN_UPLOAD_MB`). Migration pending di luar manifest, atau pending apa pun tanpa `--release`, menghentikan update.
 `update-frontend.sh --release` memeriksa `EXPECT_COMMIT`, SPA fallback/HTTPS, dan status 200 tiap `SPA_ROUTES` setelah rilis. Lihat `releases/2026-11-04/README.md`.
+Rilis yang memuat migration `ALTER ... ENGINE=InnoDB` tidak bisa di-rollback kecuali dengan me-restore dump backup (DDL MySQL tidak transaksional); jalankan di luar jam sibuk. Tabel MyISAM di-dump dengan `--lock-tables` (kunci baca singkat, user DB perlu hak `LOCK TABLES`).
